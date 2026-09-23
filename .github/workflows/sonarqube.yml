@@ -3,7 +3,7 @@ name: Release Manager Demo - SonarQube
 on:
   push:
     branches:
-      - feature/sonarqube
+      - main
 
   pull_request:
     branches:
