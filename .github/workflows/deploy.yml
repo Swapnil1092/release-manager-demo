@@ -1,0 +1,77 @@
+name: Release Manager Demo - Deploy DEV
+
+on:
+  workflow_run:
+    workflows:
+      - Release Manager Demo - CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: release-manager-demo-rg
+  CONTAINER_APP_NAME: release-manager-dev
+  ACR_NAME: rmreleasedemoacr
+  IMAGE_NAME: release-manager-demo
+
+jobs:
+  deploy-dev:
+    name: Deploy to DEV
+    runs-on: ubuntu-latest
+
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy image to DEV
+        env:
+          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          echo "Deploying image:"
+          echo "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
+
+          az containerapp update \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
+
+      - name: Get DEV URL
+        run: |
+          APP_URL=$(az containerapp show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.configuration.ingress.fqdn" \
+            --output tsv)
+
+          echo "APP_URL=https://$APP_URL" >> "$GITHUB_ENV"
+
+      - name: Smoke test DEV
+        run: |
+          echo "Testing: $APP_URL/health"
+
+          for i in {1..12}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health" || true)
+
+            echo "Attempt $i: HTTP $STATUS"
+
+            if [ "$STATUS" = "200" ]; then
+              echo "DEV smoke test passed."
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "DEV smoke test failed."
+          exit 1
