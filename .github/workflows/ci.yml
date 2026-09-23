@@ -1,4 +1,4 @@
-name: Release Manager Demo - CI
+name: Release Manager Demo - CI/CD
 
 on:
   push:
@@ -8,9 +8,19 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CONTAINER_REGISTRY: rmreleasedemoacr.azurecr.io
+  IMAGE_NAME: release-manager-demo
+  CONTAINER_APP_NAME: release-manager-dev
+  RESOURCE_GROUP: release-manager-demo-rg
+
 jobs:
-  test:
-    name: Python Tests
+  build-test-deploy:
+    name: Build, Test and Deploy DEV
     runs-on: ubuntu-latest
 
     steps:
@@ -30,3 +40,67 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest
+
+      - name: Set image tag
+        id: image
+        run: |
+          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name rmreleasedemoacr
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }} \
+            .
+
+      - name: Push Docker image to ACR
+        run: |
+          docker push \
+            ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+
+      - name: Deploy image to DEV Container App
+        run: |
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --image ${{ env.AZURE_CONTAINER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+
+      - name: Get Container App URL
+        id: app
+        run: |
+          FQDN=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn \
+            -o tsv)
+
+          echo "url=https://${FQDN}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test DEV
+        run: |
+          echo "Testing ${{ steps.app.outputs.url }}/health"
+
+          for i in {1..12}; do
+            if curl --fail --silent --show-error \
+              "${{ steps.app.outputs.url }}/health"; then
+              echo
+              echo "DEV smoke test passed."
+              exit 0
+            fi
+
+            echo "Application not ready yet. Attempt $i/12"
+            sleep 10
+          done
+
+          echo "DEV smoke test failed."
+          exit 1
