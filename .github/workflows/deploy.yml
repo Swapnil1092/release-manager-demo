@@ -9,6 +9,13 @@ on:
     branches:
       - main
 
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ACR image tag / Git commit SHA to deploy"
+        required: true
+        type: string
+
 permissions:
   id-token: write
   contents: read
@@ -24,7 +31,9 @@ jobs:
     name: Deploy to DEV
     runs-on: ubuntu-latest
 
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
 
     steps:
       - name: Azure Login
@@ -34,9 +43,37 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy image to DEV
+      - name: Select image tag
+        id: image
         env:
-          IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_TAG="$MANUAL_IMAGE_TAG"
+            echo "Deployment type: MANUAL / ROLLBACK"
+          else
+            IMAGE_TAG="$WORKFLOW_RUN_SHA"
+            echo "Deployment type: AUTOMATIC"
+          fi
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "Selected image:"
+          echo "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
+
+      - name: Verify image exists in ACR
+        run: |
+          echo "Checking image in ACR..."
+
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "$IMAGE_NAME:$IMAGE_TAG" \
+            --output none
+
+          echo "Image exists in ACR."
+
+      - name: Deploy image to DEV
         run: |
           echo "Deploying image:"
           echo "$ACR_NAME.azurecr.io/$IMAGE_NAME:$IMAGE_TAG"
